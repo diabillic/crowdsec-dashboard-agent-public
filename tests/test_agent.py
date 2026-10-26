@@ -240,6 +240,7 @@ def test_lapi_logs_in_again_when_the_token_expires():
     assert lapi.alerts(active=True) == [{"id": 1}]
     assert session.logins == 2 and session.params[2][1]["Authorization"] == "Bearer t2"
     assert session.params[2][0]["has_active_decision"] == "true"
+    assert len(session.headers["User-Agent"].split("/")) == 2  # LAPI's login rejects anything else
 
 
 @pytest.fixture

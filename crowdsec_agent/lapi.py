@@ -13,6 +13,9 @@ import re
 import requests
 
 
+USER_AGENT = "crowdsec-dashboard-agent/1.0"
+
+
 class LapiError(Exception):
     pass
 
@@ -23,7 +26,8 @@ class Lapi:
         self.url = url.rstrip("/")
         self.machine_id, self.password, self.timeout = machine_id, password, timeout
         self.http = session or requests.Session()
-        self.http.headers["User-Agent"] = "crowdsec-dashboard-agent"
+        # LAPI refuses a machine login unless the User-Agent is exactly "<name>/<version>".
+        self.http.headers["User-Agent"] = USER_AGENT
         self.token = ""
 
     def login(self) -> None:
