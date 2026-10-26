@@ -151,3 +151,4 @@ tr:hover td { background: var(--wash); }
 .chart .baseline { stroke: var(--axis); stroke-width: 1; }
 .chart .hover { fill: var(--wash); }
 .chart .hit { fill: transparent; cursor: crosshair; }
+.muted { color: var(--muted); font-size: 12px; white-space: nowrap; }
