@@ -47,6 +47,8 @@ cs_active_decisions{action="ban",origin="crowdsec",reason="crowdsecurity/appsec-
 cs_filesource_hits_total{acquis_type="npmplus",datasource_type="file",source="/logs/access.log"} 1500
 cs_parser_hits_ko_total{acquis_type="npmplus",source="/logs/access.log",type="file"} 1500
 cs_parser_hits_total{source="/logs/access.log",type="file"} 1500
+cs_filesource_hits_total{acquis_type="npmplus",datasource_type="file",source="/logs/error.log"} 900
+cs_parser_hits_ko_total{acquis_type="npmplus",source="/logs/error.log",type="file"} 900
 cs_filesource_hits_total{acquis_type="nginx",datasource_type="file",source="/logs/other.log"} 300
 cs_parser_hits_ok_total{acquis_type="nginx",source="/logs/other.log",type="file"} 290
 cs_parser_hits_ko_total{acquis_type="nginx",source="/logs/other.log",type="file"} 10
@@ -80,9 +82,10 @@ def test_metrics_summary_flags_sources_that_never_parse():
     assert s["decisions"]["byOrigin"][0] == {"name": "CAPI", "count": 17000}
     by_source = {x["source"]: x for x in s["sources"]}
     assert by_source["/logs/access.log"]["notParsing"] is True
+    assert by_source["/logs/error.log"]["notParsing"] is False and by_source["/logs/error.log"]["errorLog"]
     assert by_source["/logs/access.log"]["type"] == "npmplus"
     assert by_source["/logs/other.log"] == {"source": "/logs/other.log", "type": "nginx", "read": 300, "parsed": 290,
-                                            "unparsed": 10, "notParsing": False}
+                                            "unparsed": 10, "errorLog": False, "notParsing": False}
     assert by_source["appsec"]["read"] == 2000 and not by_source["appsec"]["notParsing"]
     assert s["appsec"]["blocked"] == 446 and s["appsec"]["topRules"][0]["count"] == 64
     assert s["bouncers"] == [{"name": "proxy", "count": 49764}]

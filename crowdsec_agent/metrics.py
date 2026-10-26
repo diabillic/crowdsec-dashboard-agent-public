@@ -5,6 +5,7 @@ Counters are cumulative since CrowdSec last started (process_start_time_seconds 
 
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
 
@@ -95,11 +96,15 @@ def summarize(samples: list[tuple[str, dict, float]]) -> dict:
     for src in sorted(set(read) | set(parsed_total) | set(parsed_ok)):
         lines = read.get(src) or parsed_total.get(src, 0)
         ok, ko = parsed_ok.get(src, 0), parsed_ko.get(src, 0)
+        # Web server error-log parsers keep only the lines scenarios use (failed logins, rate limits),
+        # so an error log with nothing parsed is normal.
+        error_log = "error" in os.path.basename(src).lower()
         sources.append({
             "source": src, "type": kind.get(src, ""), "read": int(lines), "parsed": int(ok), "unparsed": int(ko),
+            "errorLog": error_log,
             # Lines arriving but none parsing means the parser for this log type isn't installed or
             # the acquisition `type`/labels don't match it: scenarios on that log never fire.
-            "notParsing": lines >= 100 and ok == 0,
+            "notParsing": lines >= 100 and ok == 0 and not error_log,
         })
 
     return {

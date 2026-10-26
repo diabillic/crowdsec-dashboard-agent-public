@@ -247,7 +247,8 @@ function renderMetrics(o) {
     { label: "Parsed", num: true }, { label: "Unparsed", num: true }, { label: "" }],
   cs.sources.map((s) => el("tr", {}, td(s.source, "clip", s.source), td(s.type), td(num(s.read), "num"),
     td(num(s.parsed), "num"), td(num(s.unparsed), "num"),
-    el("td", {}, s.notParsing ? el("span", { class: "warn-text", text: "⚠ Not parsing" }) : null))));
+    el("td", {}, s.notParsing ? el("span", { class: "warn-text", text: "⚠ Not parsing" })
+      : s.errorLog ? el("span", { class: "muted", text: "Only failed logins and rate limits parse" }) : null))));
   $("sources-hint").textContent = `Since CrowdSec started${cs.startedAt ? ` (${when(cs.startedAt)})` : ""}. ` +
     (cs.whitelisted ? `${num(cs.whitelisted)} events were whitelisted.` : "");
 
