@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CrowdSec Dashboard</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1><img src="/favicon.svg" alt=""> CrowdSec</h1>
+    <div class="status" id="status"></div>
+    <button class="theme" id="theme" type="button" title="Switch light/dark">Theme</button>
+  </header>
+
+  <div class="filters">
+    <div class="seg" id="range" role="group" aria-label="Time range">
+      <button type="button" data-hours="24" aria-pressed="true">24 hours</button>
+      <button type="button" data-hours="168" aria-pressed="false">7 days</button>
+      <button type="button" data-hours="720" aria-pressed="false">30 days</button>
+      <button type="button" data-hours="2160" aria-pressed="false">90 days</button>
+    </div>
+    <input type="search" id="search" placeholder="Filter alerts: IP, country, scenario, host…" aria-label="Filter alerts">
+    <span class="updated" id="updated"></span>
+  </div>
+
+  <div id="banners"></div>
+
+  <section class="tiles" id="tiles" aria-label="Totals"></section>
+
+  <section class="grid" id="content">
+    <article class="card">
+      <h2>Alerts over time</h2>
+      <p class="hint" id="timeline-hint"></p>
+      <div class="legend">
+        <span><i class="s1"></i>AppSec (WAF) blocks</span>
+        <span><i class="s2"></i>Scenario alerts</span>
+      </div>
+      <div class="chart" id="timeline"></div>
+    </article>
+
+    <article class="card span-4"><h2>Countries</h2><p class="hint">Alerts by source country</p><div id="top-countries"></div></article>
+    <article class="card span-4"><h2>Scenarios</h2><p class="hint">What triggered the alerts</p><div id="top-scenarios"></div></article>
+    <article class="card span-4"><h2>Targeted hosts</h2><p class="hint">Which of your sites they hit</p><div id="top-targets"></div></article>
+    <article class="card span-6"><h2>Autonomous systems</h2><p class="hint">Networks the attacks came from</p><div id="top-as"></div></article>
+    <article class="card span-6"><h2>Top source IPs</h2><p class="hint">Most alerts per address</p><div id="top-sources"></div></article>
+
+    <article class="card">
+      <h2>Active decisions</h2>
+      <p class="hint" id="decisions-hint"></p>
+      <div class="table-wrap"><table id="decisions"></table></div>
+      <div class="more" id="decisions-more"></div>
+    </article>
+
+    <article class="card span-6"><h2>Blocklists and bans</h2><p class="hint" id="origins-hint">Every active decision, by origin</p><div id="origins"></div></article>
+    <article class="card span-6"><h2>AppSec rules</h2><p class="hint" id="appsec-hint"></p><div id="rules"></div></article>
+
+    <article class="card span-8">
+      <h2>Log sources</h2>
+      <p class="hint" id="sources-hint"></p>
+      <div class="table-wrap"><table id="sources"></table></div>
+    </article>
+    <article class="card span-4">
+      <h2>API clients</h2>
+      <p class="hint">Requests to the Local API since CrowdSec started</p>
+      <div class="table-wrap"><table id="clients"></table></div>
+    </article>
+
+    <article class="card">
+      <h2>Alerts</h2>
+      <p class="hint" id="alerts-hint"></p>
+      <div class="table-wrap"><table id="alerts"></table></div>
+      <div class="more" id="alerts-more"></div>
+    </article>
+  </section>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+<script src="/app.js"></script>
+</body>
+</html>
