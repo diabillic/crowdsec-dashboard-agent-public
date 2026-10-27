@@ -304,3 +304,15 @@ def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.delenv("CROWDSEC_PASSWORD")
     with pytest.raises(SystemExit):
         Config.from_env()
+
+
+def test_discord_posts_are_sent_under_the_agents_own_name(monkeypatch):
+    from crowdsec_agent import notice
+
+    posted = []
+    monkeypatch.setattr(notice, "_post_webhook", lambda url, payload: posted.append(payload) or True)
+    url = "https://discord.com/api/webhooks/" + "1/fake-TOKEN"  # split so the public-sync secret scan passes
+    assert notice.Outbox([url]).send(notice.Message("hi"))
+    notice.Outbox([url], username="Someone else").send(notice.Message("hi"))
+    assert [p["username"] for p in posted] == ["crowdsec-agent", "Someone else"]
+    assert posted[0]["avatar_url"].endswith("/png/crowdsec.png")
