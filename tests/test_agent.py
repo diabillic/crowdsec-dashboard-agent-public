@@ -316,3 +316,20 @@ def test_discord_posts_are_sent_under_the_agents_own_name(monkeypatch):
     notice.Outbox([url], username="Someone else").send(notice.Message("hi"))
     assert [p["username"] for p in posted] == ["crowdsec-agent", "Someone else"]
     assert posted[0]["avatar_url"].endswith("/png/crowdsec.png")
+
+
+def test_undelivered_digest_is_retried(tmp_path):
+    from crowdsec_agent.findings import Finding
+    from crowdsec_agent.notify import Notifier
+    st = State(str(tmp_path / "s.json"))
+    n = Notifier([], 12, st)
+    sent, ok = [], [False]
+    n.outbox = type("O", (), {"send": lambda s, msg: sent.append(msg.markdown()) or ok[0]})()
+    down = Finding("crowdsec:metrics", "metrics unreachable", "error")
+    n.send([down], ["CrowdSec's Local API is reachable again."])  # the post fails
+    assert st["notified"] == {}
+    ok[0] = True
+    n.send([down])  # the recovery isn't reported again by the collector, but it's still owed
+    assert len(sent) == 2 and "reachable again" in sent[1] and "metrics unreachable" in sent[1]
+    n.send([down])
+    assert len(sent) == 2  # delivered: nothing is repeated
