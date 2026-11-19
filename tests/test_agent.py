@@ -21,13 +21,14 @@ def iso(ts):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
-def alert(n, ago=60, kind="waf", ip="203.0.113.7", cn="NL", decision=None, scenario="crowdsecurity/vpatch-env-access"):
+def alert(n, ago=60, kind="waf", ip="203.0.113.7", cn="NL", decision=None, scenario="crowdsecurity/vpatch-env-access",
+          lat=52.3824, lon=4.9004):
     return {
         "id": n, "uuid": f"u-{n}", "created_at": iso(NOW - ago), "start_at": iso(NOW - ago), "kind": kind,
         "scenario": scenario, "message": f"WAF block: {scenario} from {ip}", "machine_id": "localhost",
         "events_count": 1, "simulated": False,
         "source": {"scope": "Ip", "value": ip, "ip": ip, "cn": cn, "as_name": "EXAMPLE-NET", "as_number": "64500",
-                   "range": "203.0.113.0/24"},
+                   "range": "203.0.113.0/24", "latitude": lat, "longitude": lon},
         "meta": [{"key": "target_uri", "value": '["/.env"]'}],
         "events": [{"meta": [{"key": "target_fqdn", "value": "app.example.com"}, {"key": "uri", "value": "/.env"}]}],
         "decisions": [decision] if decision else None,
@@ -98,6 +99,53 @@ def test_row_extracts_source_target_and_decision():
     assert r["target"] == "app.example.com" and r["uri"] == "/.env"
     assert r["decision"] == "ban" and r["decision_until"] == pytest.approx(NOW + 3 * 3600 + 59 * 60 + 30)
     assert r["created_at"] == NOW - 60
+    assert (r["lat"], r["lon"]) == (52.382, 4.9)
+    assert row(alert(2, lat=0, lon=0), NOW)["lat"] is None  # CrowdSec's "no coordinates"
+    assert row(alert(3, lat=None, lon=None), NOW)["lon"] is None
+
+
+def test_store_map_groups_places_and_categories(tmp_path):
+    store = Store(str(tmp_path / "a.db"))
+    store.upsert([alert(1), alert(2, lat=52.3901, lon=4.9011),  # same 0.1° cell
+                  alert(3, kind="crowdsec", decision=BAN),
+                  alert(4, kind="crowdsec", cn="US", lat=0, lon=0),  # no coordinates: placed by country
+                  alert(5, cn="", lat=0, lon=0),  # nowhere to put it
+                  alert(6, ago=3 * 86400)], NOW)
+    m = store.map(24, NOW)
+    assert m["total"] == 5 and m["unlocated"] == 1
+    cells = {(p["lat"], p["lon"], p["cn"]): p for p in m["points"]}
+    assert cells[(52.4, 4.9, "NL")] == {"lat": 52.4, "lon": 4.9, "cn": "NL", "banned": 1, "blocked": 2, "flagged": 0}
+    assert cells[(None, None, "US")]["flagged"] == 1
+
+
+def test_store_live_feed_only_reports_newly_stored_alerts(tmp_path):
+    store = Store(str(tmp_path / "a.db"))
+    store.upsert([alert(1, ago=600), alert(2, ago=30 * 86400)], NOW - 60)  # first sync: a backlog
+    first = store.live(None, now=NOW)
+    assert first["cursor"] == NOW - 60 and [e["at"] for e in first["events"]] == [NOW - 600, NOW - 30 * 86400]
+    assert store.live(first["cursor"], now=NOW)["events"] == []
+
+    store.upsert([alert(1, ago=600), alert(3, ago=20, kind="crowdsec", decision=BAN)], NOW)  # overlap + one new
+    nxt = store.live(first["cursor"], now=NOW)
+    assert nxt["cursor"] == NOW and [(e["source"], e["category"]) for e in nxt["events"]] == [("203.0.113.7", "banned")]
+    assert store.live(None, now=NOW)["events"][0]["lat"] == pytest.approx(52.382)
+
+
+def test_store_adds_new_columns_to_an_old_database(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE alerts (uuid TEXT PRIMARY KEY, id INTEGER, created_at REAL NOT NULL, scenario TEXT, kind TEXT, "
+               "message TEXT, machine TEXT, scope TEXT, value TEXT, ip TEXT, cn TEXT, as_name TEXT, as_number TEXT, "
+               "ip_range TEXT, target TEXT, uri TEXT, events INTEGER, simulated INTEGER, decision TEXT, decision_until REAL)")
+    db.execute("INSERT INTO alerts (uuid, created_at, cn, kind) VALUES ('old', ?, 'DE', 'waf')", (NOW - 100,))
+    db.commit()
+    db.close()
+    store = Store(path)
+    assert store.live(None, now=NOW)["cursor"] == NOW - 100  # old rows count as seen when they were created
+    assert store.map(24, NOW)["points"] == [{"lat": None, "lon": None, "cn": "DE", "banned": 0, "blocked": 1, "flagged": 0}]
+    store.upsert([alert(1)], NOW)
+    assert store.count() == 2
 
 
 def test_store_summary_upsert_and_prune(tmp_path):
@@ -278,6 +326,13 @@ def test_dashboard_serves_page_and_api(web):
     data = json.loads(get(base + "/api/overview?hours=24")[2])
     assert data["summary"]["total"] == 1 and data["decisionsTotal"] == 1 and data["agent"]["revision"] == "test"
     assert json.loads(get(base + "/api/alerts?hours=99999&q=203.0")[2])["alerts"][0]["id"] == 1
+    world = json.loads(get(base + "/world.json")[2])
+    assert len(world["land"]) > 100 and world["centroids"]["NL"] and world["centroids"]["SG"]
+    assert json.loads(get(base + "/api/map?hours=24")[2])["points"][0]["blocked"] == 1
+    live = json.loads(get(base + "/api/live")[2])
+    assert live["cursor"] > 0 and live["events"][0]["category"] == "blocked"
+    assert json.loads(get(base + f"/api/live?after={live['cursor']}")[2])["events"] == []
+    assert json.loads(get(base + "/api/live?after=junk")[2])["cursor"] == live["cursor"]
     with pytest.raises(urllib.error.HTTPError) as err:
         get(base + "/nope")
     assert err.value.code == 404

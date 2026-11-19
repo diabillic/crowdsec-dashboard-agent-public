@@ -3,6 +3,8 @@
   GET /                       the dashboard
   GET /api/overview?hours=24  status, alert summary for the range, active decisions, metrics
   GET /api/alerts?hours=24&q= alerts in the range, newest first, optionally filtered
+  GET /api/map?hours=24       alert counts per place (banned / blocked / flagged) for the heat map
+  GET /api/live?after=<cursor> alerts stored since the cursor, for the map's live pings (no cursor: the latest few)
   GET /health                 200 while the server runs (container health; never needs auth)
 
 Basic auth guards everything but /health when DASHBOARD_PASSWORD is set (any user name).
@@ -29,7 +31,8 @@ WEB = os.path.join(os.path.dirname(__file__), "web")
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/app.css": ("app.css", "text/css; charset=utf-8"),
-          "/favicon.svg": ("favicon.svg", "image/svg+xml")}
+          "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+          "/world.json": ("world.json", "application/json")}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
@@ -119,6 +122,14 @@ def make_handler(store: Store, snapshot: Snapshot, password: str, max_hours: int
                     except ValueError:
                         limit = 500
                     return self._json(200, {"alerts": store.alerts(self._hours(params), query, limit)})
+                if url.path == "/api/map":
+                    return self._json(200, store.map(self._hours(params)))
+                if url.path == "/api/live":
+                    try:
+                        after = float((params.get("after") or [""])[0])
+                    except ValueError:
+                        after = None
+                    return self._json(200, store.live(after))
             except Exception:  # keep serving; the page shows the error
                 log.exception("web %s failed", url.path)
                 return self._json(500, {"error": "internal error, see the agent's log"})

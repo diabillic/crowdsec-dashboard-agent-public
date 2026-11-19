@@ -22,13 +22,19 @@ CREATE TABLE IF NOT EXISTS alerts (
     scenario TEXT, kind TEXT, message TEXT, machine TEXT,
     scope TEXT, value TEXT, ip TEXT, cn TEXT, as_name TEXT, as_number TEXT, ip_range TEXT,
     target TEXT, uri TEXT, events INTEGER, simulated INTEGER,
-    decision TEXT, decision_until REAL
+    decision TEXT, decision_until REAL,
+    lat REAL, lon REAL, seen_at REAL
 );
 CREATE INDEX IF NOT EXISTS alerts_created ON alerts (created_at);
 """
+# Columns added after the first release; older databases get them on open.
+ADDED = {"lat": "REAL", "lon": "REAL", "seen_at": "REAL"}
 
 COLUMNS = ("uuid", "id", "created_at", "scenario", "kind", "message", "machine", "scope", "value", "ip", "cn",
-           "as_name", "as_number", "ip_range", "target", "uri", "events", "simulated", "decision", "decision_until")
+           "as_name", "as_number", "ip_range", "target", "uri", "events", "simulated", "decision", "decision_until",
+           "lat", "lon")
+# How far back the live feed looks: a first sync stores weeks of alerts at once, and those aren't news.
+LIVE_WINDOW = 2 * 3600
 
 # Bucket width for the timeline by range: hourly up to 2 days, 6-hourly up to 10, then daily.
 def bucket_seconds(hours: int) -> int:
@@ -42,6 +48,20 @@ def _ts(text: str | None) -> float | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def category(kind: str, decision: str) -> str:
+    """How the map shows an alert: banned (it got a decision), blocked (AppSec stopped the request)
+    or flagged (detected, nothing enforced)."""
+    return "banned" if decision else "blocked" if kind == "waf" else "flagged"
+
+
+def _coord(value, limit: float) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(v, 3) if -limit <= v <= limit else None
 
 
 def _meta(items: list | None, key: str) -> str:
@@ -70,6 +90,10 @@ def row(alert: dict, now: float) -> dict:
     decisions = [d for d in alert.get("decisions") or [] if not d.get("simulated")]
     first = decisions[0] if decisions else {}
     created = _ts(alert.get("created_at")) or _ts(alert.get("start_at")) or now
+    # GeoIP city coordinates; 0,0 means CrowdSec had none (the map then uses the country).
+    located = bool(src.get("latitude") or src.get("longitude"))
+    lat = _coord(src.get("latitude"), 90) if located else None
+    lon = _coord(src.get("longitude"), 180) if located else None
     return {
         "uuid": alert.get("uuid") or f"id-{alert.get('id')}-{created}",
         "id": alert.get("id"),
@@ -91,6 +115,8 @@ def row(alert: dict, now: float) -> dict:
         "simulated": 1 if alert.get("simulated") else 0,
         "decision": first.get("type") or "",
         "decision_until": now + go_duration(first.get("duration", "")) if first else None,
+        "lat": lat if lon is not None else None,
+        "lon": lon if lat is not None else None,
     }
 
 
@@ -119,8 +145,14 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.Lock()
-        with self.lock:
+        with self.lock, self.db:
             self.db.executescript(SCHEMA)
+            have = {r[1] for r in self.db.execute("PRAGMA table_info(alerts)")}
+            for col, kind in ADDED.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE alerts ADD COLUMN {col} {kind}")
+            self.db.execute("UPDATE alerts SET seen_at = created_at WHERE seen_at IS NULL")
+            self.db.execute("CREATE INDEX IF NOT EXISTS alerts_seen ON alerts (seen_at)")
 
     def count(self) -> int:
         with self.lock:
@@ -129,10 +161,11 @@ class Store:
     def upsert(self, alerts: list[dict], now: float | None = None) -> int:
         now = now or time.time()
         rows = [row(a, now) for a in alerts]
-        sql = (f"INSERT INTO alerts ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))}) "
+        # seen_at is when the agent first stored the alert (the live map's cursor); re-reads keep it.
+        sql = (f"INSERT INTO alerts ({', '.join(COLUMNS)}, seen_at) VALUES ({', '.join('?' * (len(COLUMNS) + 1))}) "
                f"ON CONFLICT(uuid) DO UPDATE SET {', '.join(f'{c}=excluded.{c}' for c in COLUMNS[1:])}")
         with self.lock, self.db:
-            self.db.executemany(sql, [tuple(r[c] for c in COLUMNS) for r in rows])
+            self.db.executemany(sql, [(*(r[c] for c in COLUMNS), now) for r in rows])
         return len(rows)
 
     def prune(self, retention_days: int, now: float | None = None) -> int:
@@ -182,6 +215,46 @@ class Store:
             "topTargets": top("target"),
             "topSources": top("ip"),
         }
+
+    def map(self, hours: int, now: float | None = None) -> dict:
+        """Alert counts per place for the heat map: per 0.1° cell when CrowdSec had coordinates, else per
+        country (the page puts those on the country's centroid)."""
+        now = now or time.time()
+        with self.lock:
+            rows = self.db.execute("SELECT lat, lon, cn, kind, decision FROM alerts WHERE created_at >= ?",
+                                   (now - hours * 3600,)).fetchall()
+        cells: dict[tuple, dict] = {}
+        unlocated = 0
+        for r in rows:
+            if r["lat"] is not None and r["lon"] is not None:
+                key = (round(r["lat"], 1), round(r["lon"], 1))
+            elif r["cn"]:
+                key = (None, None, r["cn"])
+            else:
+                unlocated += 1
+                continue
+            cell = cells.get(key)
+            if cell is None:
+                cell = cells[key] = {"lat": key[0], "lon": key[1], "cn": r["cn"], "banned": 0, "blocked": 0, "flagged": 0}
+            cell[category(r["kind"], r["decision"])] += 1
+        return {"hours": hours, "total": len(rows), "unlocated": unlocated, "points": list(cells.values())}
+
+    def live(self, after: float | None, limit: int = 100, now: float | None = None) -> dict:
+        """Alerts the agent stored after the cursor `after`, newest first, and the next cursor. Without a
+        cursor: the cursor and the latest few alerts, so a page that just opened has a feed but no replay."""
+        now = now or time.time()
+        cols = "created_at, value, ip, cn, as_name, scenario, kind, decision, target, lat, lon"
+        with self.lock:
+            cursor = self.db.execute("SELECT MAX(seen_at) FROM alerts").fetchone()[0] or 0
+            if after is None:
+                rows = self.db.execute(f"SELECT {cols} FROM alerts ORDER BY created_at DESC LIMIT 12").fetchall()
+            else:
+                rows = self.db.execute(f"SELECT {cols} FROM alerts WHERE seen_at > ? AND created_at >= ? "
+                                       "ORDER BY created_at DESC LIMIT ?", (after, now - LIVE_WINDOW, limit)).fetchall()
+        events = [{"at": r["created_at"], "source": r["value"] or r["ip"], "cn": r["cn"], "asName": r["as_name"],
+                   "scenario": r["scenario"], "target": r["target"], "lat": r["lat"], "lon": r["lon"],
+                   "category": category(r["kind"], r["decision"])} for r in rows]
+        return {"cursor": cursor, "events": events}
 
     def alerts(self, hours: int, query: str = "", limit: int = 500, now: float | None = None) -> list[dict]:
         now = now or time.time()

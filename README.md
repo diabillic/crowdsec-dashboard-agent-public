@@ -17,6 +17,7 @@ the page is plain HTML, CSS and JavaScript with no CDN.
 | Section | Source |
 |---|---|
 | Totals: alerts, source IPs, countries, active local bans, blocklisted IPs, AppSec blocks | alert history + metrics |
+| Attack map: a heat map of where alerts came from, live pings as new ones arrive, and a feed of the latest | alert history |
 | Alerts over time, AppSec (WAF) blocks vs scenario alerts | alert history |
 | Top countries, scenarios, targeted hosts, autonomous systems, source IPs | alert history |
 | Active decisions with country, network, scenario, origin and time left | Local API |
@@ -28,6 +29,25 @@ the page is plain HTML, CSS and JavaScript with no CDN.
 
 Pick 24 hours, 7, 30 or 90 days at the top; everything on the page follows. The page refreshes
 every minute, and its light/dark theme follows the system unless you switch it.
+
+### Attack map
+
+The heat shows where the range's alerts came from, using the GeoIP city coordinates CrowdSec attaches
+to each alert. An alert without coordinates is placed on its country's centroid, and its tooltip
+says "country only". Each alert falls into one category, and the buttons above the map toggle them:
+
+| Category | Meaning |
+|---|---|
+| **Banned** | the alert got a decision (usually a ban) |
+| **Blocked** | AppSec (the WAF) blocked the request, without a ban |
+| **Flagged** | a scenario detected it, but nothing was enforced (no decision, or simulation mode) |
+
+The page asks the agent for new alerts every 10 seconds. Each one ripples on the map in its category's
+colour and goes to the top of the feed, and the heat catches up. Alerts reach the agent once per
+`POLL_SECONDS` sync (default 60; lower it, down to 15, for a livelier map). Live updates pause while
+the tab is hidden. The outlines are [Natural Earth](https://www.naturalearthdata.com) 1:110m
+countries (public domain), served from `web/world.json` like the rest of the page, so there is no
+tile server or CDN.
 
 A log source that reads lines but parses none means CrowdSec has no parser for that log type, or the
 acquisition `labels.type` doesn't match the installed collection. Scenarios on that log then never

@@ -280,6 +280,7 @@ function render() {
   if (!o) return;
   renderStatus(o);
   renderTiles(o);
+  renderMap();
   renderTimeline(o);
   const total = o.summary.total;
   barList("top-countries", o.summary.topCountries, (cc) => `${flag(cc)} ${country(cc)}`, total);
@@ -293,6 +294,255 @@ function render() {
   $("updated").textContent = `Updated ${fmtHour.format(new Date())}`;
 }
 
+// ---------- attack map: heat of where alerts came from, plus live pings ----------
+// Equirectangular, cropped to 84°N–58°S (no Antarctica). Points without GeoIP coordinates sit on
+// their country's centroid. Drawn on canvas: land + heat below, pings on an overlay above.
+const LAT_N = 84, LAT_S = -58, LIVE_MS = 10000, PING_MS = 2600, FEED_MAX = 12;
+const CATS = ["banned", "blocked", "flagged"];
+const CAT_LABEL = { banned: "Banned", blocked: "Blocked", flagged: "Flagged" };
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const map = { world: null, worldP: null, data: null, show: new Set(CATS), cursor: null, feed: [], pings: [],
+  hit: [], radius: 10, raf: 0, liveTimer: null, refreshTimer: null, ramp: null, rampKey: "" };
+
+async function loadWorld() {
+  if (!map.worldP) {
+    map.worldP = getJSON("/world.json").then((w) => {
+      const land = w.land.map((flat) => {
+        const ring = [];
+        let x = 0, y = 0;
+        for (let i = 0; i < flat.length; i += 2) { x += flat[i]; y += flat[i + 1]; ring.push([x / 10, y / 10]); }
+        return ring;
+      });
+      map.world = { land, centroids: w.centroids };
+    }).catch((err) => { map.worldP = null; throw err; });
+  }
+  return map.worldP;
+}
+function where(p) { // [lon, lat] or null
+  if (p.lat !== null && p.lat !== undefined && p.lon !== null && p.lon !== undefined) return [p.lon, p.lat];
+  const c = map.world && p.cn && map.world.centroids[p.cn.toUpperCase()];
+  return c || null;
+}
+function project(lonlat, W, H) {
+  return [((lonlat[0] + 180) / 360) * W, ((LAT_N - lonlat[1]) / (LAT_N - LAT_S)) * H];
+}
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+function heatRamp() { // 256 RGBA steps; low intensity fades to transparent so the land shows through
+  const stops = [1, 2, 3, 4, 5].map((i) => cssVar(`--heat-${i}`));
+  const key = stops.join();
+  if (map.ramp && map.rampKey === key) return map.ramp;
+  const c = document.createElement("canvas");
+  c.width = 256; c.height = 1;
+  const ctx = c.getContext("2d"), g = ctx.createLinearGradient(0, 0, 256, 0);
+  stops.forEach((s, i) => g.addColorStop(i / (stops.length - 1), s));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 256, 1);
+  const px = ctx.getImageData(0, 0, 256, 1).data;
+  for (let i = 0; i < 256; i++) px[i * 4 + 3] = Math.round(Math.min(1, 0.25 + (i / 255) * 1.5) * 230);
+  map.rampKey = key;
+  return (map.ramp = px);
+}
+
+function drawMap() {
+  const box = $("map"), heat = $("map-heat"), fx = $("map-fx");
+  const W = box.clientWidth, H = box.clientHeight;
+  if (!W || !H || !map.world) return;
+  const dpr = window.devicePixelRatio || 1, PW = Math.round(W * dpr), PH = Math.round(H * dpr);
+  for (const c of [heat, fx]) if (c.width !== PW || c.height !== PH) { c.width = PW; c.height = PH; }
+  const ctx = heat.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, PW, PH);
+
+  // land, with country borders in the surface color
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.beginPath();
+  for (const ring of map.world.land) {
+    ring.forEach((pt, i) => { const [x, y] = project(pt, W, H); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.closePath();
+  }
+  ctx.fillStyle = cssVar("--land");
+  ctx.fill();
+  ctx.strokeStyle = cssVar("--surface");
+  ctx.lineWidth = 0.6;
+  ctx.stroke();
+
+  // heat: a Gaussian kernel per place summed on a grid (2 CSS px cells), log-scaled to the busiest
+  // spot so one alert still shows, then coloured from the ramp and smoothed up to full size
+  map.radius = Math.max(8, Math.min(24, W / 55));
+  map.hit = [];
+  for (const p of (map.data && map.data.points) || []) {
+    const n = CATS.reduce((sum, c) => sum + (map.show.has(c) ? p[c] : 0), 0);
+    const ll = n && where(p);
+    if (!ll) continue;
+    const [x, y] = project(ll, W, H);
+    map.hit.push({ x, y, n, p, approx: p.lat === null || p.lat === undefined });
+  }
+  if (!map.hit.length) return;
+  const cell = 2, GW = Math.ceil(W / cell), GH = Math.ceil(H / cell), R = Math.ceil(map.radius / cell);
+  const grid = new Float32Array(GW * GH), kernel = [], sigma2 = 2 * (R / 2.5) ** 2;
+  for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+    if (dx * dx + dy * dy <= R * R) kernel.push(dx, dy, Math.exp(-(dx * dx + dy * dy) / sigma2));
+  }
+  for (const h of map.hit) {
+    const cx = Math.round(h.x / cell), cy = Math.round(h.y / cell);
+    for (let k = 0; k < kernel.length; k += 3) {
+      const gx = cx + kernel[k], gy = cy + kernel[k + 1];
+      if (gx >= 0 && gx < GW && gy >= 0 && gy < GH) grid[gy * GW + gx] += h.n * kernel[k + 2];
+    }
+  }
+  let max = 0;
+  for (const v of grid) if (v > max) max = v;
+  const scale = 255 / Math.log1p(max), ramp = heatRamp();
+  const img = new ImageData(GW, GH), px = img.data;
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i] < 0.02) continue;
+    const j = Math.min(255, Math.round(Math.log1p(grid[i]) * scale)) * 4;
+    px[i * 4] = ramp[j]; px[i * 4 + 1] = ramp[j + 1]; px[i * 4 + 2] = ramp[j + 2]; px[i * 4 + 3] = ramp[j + 3];
+  }
+  const small = document.createElement("canvas");
+  small.width = GW; small.height = GH;
+  small.getContext("2d").putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(small, 0, 0, GW * cell, GH * cell);
+}
+
+function renderMap() {
+  const d = map.data;
+  if (!d) return;
+  const totals = Object.fromEntries(CATS.map((c) => [c, d.points.reduce((s, p) => s + p[c], 0)]));
+  for (const c of CATS) $(`map-n-${c}`).textContent = compact(totals[c]);
+  const poll = state.overview && state.overview.agent && state.overview.agent.pollSeconds;
+  $("map-hint").textContent = `Where ${num(d.total)} alerts came from, ${rangeLabel(d.hours)}` +
+    (d.unlocated ? ` (${num(d.unlocated)} without a location)` : "") +
+    `. New alerts ripple in as the agent syncs${poll ? `, every ${poll}s` : ""}.`;
+  drawMap();
+}
+
+// pings: an expanding ring in the category colour, with a 2px surface ring keeping the dot off the heat
+function ping(ev) {
+  const ll = where(ev);
+  if (!ll || !map.show.has(ev.category)) return;
+  map.pings.push({ ll, cat: ev.category, t0: performance.now() });
+  if (!map.raf) map.raf = requestAnimationFrame(animatePings);
+}
+function animatePings(now) {
+  const fx = $("map-fx"), box = $("map");
+  const W = box.clientWidth, H = box.clientHeight, dpr = window.devicePixelRatio || 1;
+  const ctx = fx.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, fx.width, fx.height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  map.pings = map.pings.filter((p) => now - p.t0 < PING_MS);
+  const colors = { banned: cssVar("--series-3"), blocked: cssVar("--series-1"), flagged: cssVar("--series-2") };
+  const surface = cssVar("--surface");
+  for (const p of map.pings) {
+    const t = (now - p.t0) / PING_MS, [x, y] = project(p.ll, W, H);
+    ctx.globalAlpha = 1 - t;
+    if (!reducedMotion.matches) {
+      ctx.beginPath();
+      ctx.arc(x, y, 4 + 26 * (1 - Math.pow(1 - t, 3)), 0, Math.PI * 2);
+      ctx.strokeStyle = colors[p.cat];
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = colors[p.cat];
+    ctx.fill();
+    ctx.strokeStyle = surface;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  map.raf = map.pings.length ? requestAnimationFrame(animatePings) : 0;
+}
+
+function renderFeed() {
+  const items = map.feed.filter((e) => map.show.has(e.category));
+  if (!items.length) return $("map-feed").replaceChildren(el("li", { class: "empty", text: "Waiting for alerts…" }));
+  const today = new Date().toDateString();
+  $("map-feed").replaceChildren(...items.map((e) => {
+    const d = new Date(e.at * 1000);
+    const what = [e.cn ? `${flag(e.cn)} ${country(e.cn)}` : "", short(e.scenario)].filter(Boolean).join(" · ");
+    return el("li", { class: e.fresh ? "fresh" : null, title: [e.asName, e.target].filter(Boolean).join(" → ") },
+      el("i", { class: `c-${e.category}` }),
+      el("span", { class: "src" }, el("span", { class: "cat", text: CAT_LABEL[e.category] }), ` ${e.source || ""}`),
+      el("span", { class: "t", text: d.toDateString() === today ? fmtHour.format(d) : fmtDay.format(d) }),
+      el("span", { class: "what", text: what }));
+  }));
+  for (const e of map.feed) e.fresh = false;
+}
+
+function arrive(events) { // newest first from the API; play them oldest first, spread over the poll gap
+  const list = events.slice().reverse(), gap = Math.min(700, (LIVE_MS * 0.8) / list.length);
+  list.forEach((ev, i) => setTimeout(() => {
+    ping(ev);
+    map.feed.unshift({ ...ev, fresh: true });
+    map.feed.length = Math.min(map.feed.length, FEED_MAX);
+    renderFeed();
+  }, i * gap));
+  clearTimeout(map.refreshTimer); // the heat catches up once the pings have played
+  map.refreshTimer = setTimeout(refreshMap, list.length * gap + 500);
+}
+async function refreshMap() {
+  try {
+    map.data = await getJSON(`/api/map?hours=${state.hours}`);
+    renderMap();
+  } catch { /* the next full refresh retries */ }
+}
+function setLive(cls, text, title) {
+  const p = $("map-live");
+  p.className = `pill live ${cls}`;
+  p.lastChild.textContent = text;
+  if (title) p.title = title;
+}
+async function pollLive() {
+  clearTimeout(map.liveTimer);
+  if (document.hidden) return setLive("", "Paused", "Live updates pause while the tab is hidden");
+  try {
+    await loadWorld();
+    const r = await getJSON(`/api/live${map.cursor === null ? "" : `?after=${encodeURIComponent(map.cursor)}`}`);
+    if (map.cursor === null) {
+      map.feed = r.events.map((e) => ({ ...e, fresh: false }));
+      renderFeed();
+    } else if (r.events.length) arrive(r.events);
+    map.cursor = r.cursor;
+    setLive("ok", "Live", `Checked ${fmtHour.format(new Date())}`);
+  } catch (err) {
+    setLive("bad", "Offline", err.message);
+  }
+  map.liveTimer = setTimeout(pollLive, LIVE_MS);
+}
+
+$("map-filters").addEventListener("click", (evt) => {
+  const btn = evt.target.closest("button[data-cat]");
+  if (!btn) return;
+  const cat = btn.dataset.cat, on = !map.show.has(cat);
+  if (on) map.show.add(cat); else map.show.delete(cat);
+  btn.setAttribute("aria-pressed", String(on));
+  drawMap();
+  renderFeed();
+});
+$("map-fx").addEventListener("pointermove", (evt) => {
+  const r = evt.currentTarget.getBoundingClientRect(), mx = evt.clientX - r.left, my = evt.clientY - r.top;
+  let best = null, bestD = map.radius * map.radius;
+  for (const h of map.hit) {
+    const d = (h.x - mx) ** 2 + (h.y - my) ** 2;
+    if (d <= bestD) { best = h; bestD = d; }
+  }
+  if (!best) return hideTip();
+  const p = best.p, name = p.cn ? `${flag(p.cn)} ${country(p.cn)}` : "Unknown country";
+  showTip(evt, best.approx ? `${name} (country only)` : `${name}, near ${p.lat.toFixed(1)}, ${p.lon.toFixed(1)}`, [
+    { value: num(best.n), label: `alert${best.n === 1 ? "" : "s"} here, ${rangeLabel(map.data.hours)}` },
+    ...CATS.filter((c) => map.show.has(c)).map((c) => ({ value: num(p[c]), label: CAT_LABEL[c], cls: `c-${c}` })),
+  ]);
+});
+$("map-fx").addEventListener("pointerleave", hideTip);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollLive(); });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawMap);
+
 // ---------- data ----------
 async function getJSON(url) {
   const resp = await fetch(url, { cache: "no-store" });
@@ -304,12 +554,15 @@ async function load() {
   content.classList.add("loading"); // refetch keeps the frame
   try {
     const q = encodeURIComponent(state.query);
-    const [overview, alerts] = await Promise.all([
+    const [overview, alerts, places] = await Promise.all([
       getJSON(`/api/overview?hours=${state.hours}`),
       getJSON(`/api/alerts?hours=${state.hours}&limit=1000&q=${q}`),
+      getJSON(`/api/map?hours=${state.hours}`),
+      loadWorld(),
     ]);
     state.overview = overview;
     state.alerts = alerts.alerts;
+    map.data = places;
     render();
   } catch (err) {
     $("updated").textContent = `Couldn't refresh: ${err.message}`;
@@ -352,10 +605,12 @@ $("theme").addEventListener("click", () => {
     : window.matchMedia("(prefers-color-scheme: dark)").matches;
   document.documentElement.dataset.theme = dark ? "light" : "dark";
   try { localStorage.setItem("theme", document.documentElement.dataset.theme); } catch { /* private mode */ }
+  drawMap();
 });
 try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch { /* private mode */ }
 let resizeTimer;
-window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => state.overview && renderTimeline(state.overview), 150); });
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { drawMap(); if (state.overview) renderTimeline(state.overview); }, 150); });
 
 readHash();
 load();
+pollLive();

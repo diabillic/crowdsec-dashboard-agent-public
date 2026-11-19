@@ -31,6 +31,32 @@
   <section class="tiles" id="tiles" aria-label="Totals"></section>
 
   <section class="grid" id="content">
+    <article class="card" id="map-card">
+      <div class="card-head">
+        <div>
+          <h2>Attack map</h2>
+          <p class="hint" id="map-hint"></p>
+        </div>
+        <span class="pill live" id="map-live" title="New alerts ripple on the map as the agent stores them"><span class="dot"></span>Live</span>
+      </div>
+      <div class="map-filters" id="map-filters" role="group" aria-label="Show on the map">
+        <button type="button" data-cat="banned" aria-pressed="true" title="Alerts that got a decision (a ban)"><i class="c-banned"></i>Banned <b id="map-n-banned"></b></button>
+        <button type="button" data-cat="blocked" aria-pressed="true" title="Requests AppSec (the WAF) blocked, without a ban"><i class="c-blocked"></i>Blocked <b id="map-n-blocked"></b></button>
+        <button type="button" data-cat="flagged" aria-pressed="true" title="Detected by a scenario, nothing enforced"><i class="c-flagged"></i>Flagged <b id="map-n-flagged"></b></button>
+        <span class="map-scale" aria-hidden="true">Fewer <span class="ramp"></span> More alerts</span>
+      </div>
+      <div class="map-layout">
+        <div class="map" id="map" role="img" aria-label="Heat map of where alerts came from">
+          <canvas id="map-heat"></canvas>
+          <canvas id="map-fx"></canvas>
+        </div>
+        <aside class="feed" aria-live="polite">
+          <h3>Latest alerts</h3>
+          <ol id="map-feed"></ol>
+        </aside>
+      </div>
+    </article>
+
     <article class="card">
       <h2>Alerts over time</h2>
       <p class="hint" id="timeline-hint"></p>
