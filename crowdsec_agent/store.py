@@ -4,7 +4,9 @@ database sooner (db_config.flush.max_age). One row per alert, keyed by the alert
 
 from __future__ import annotations
 
+import functools
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -52,6 +54,31 @@ def _ts(text: str | None) -> float | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+# Country names for the alert filter: ISO code -> lowercase English names and aliases (Natural Earth).
+COUNTRIES = os.path.join(os.path.dirname(__file__), "countries.json")
+
+
+@functools.cache
+def _country_names() -> dict[str, list[str]]:
+    try:
+        with open(COUNTRIES, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def countries_named(query: str) -> set[str]:
+    """Codes of the countries named exactly `query` ("uk", "china"), else those whose name, or a word of
+    it, starts with it: "russ" finds Russia, "kingdom" the UK, "us" the USA but not Australia or Belarus."""
+    q = query.strip().lower()
+    if len(q) < 2:
+        return set()
+    countries = _country_names()
+    exact = {code for code, names in countries.items() if q in names}
+    return exact or {code for code, names in countries.items()
+                     if any(n.startswith(q) or any(w.startswith(q) for w in re.split(r"[\W_]+", n)) for n in names)}
 
 
 def category(kind: str, decision: str) -> str:
@@ -316,9 +343,10 @@ class Store:
         """One page of the alerts matching `query`, newest first, and how many match in all."""
         now = now or time.time()
         q = query.strip().lower()
+        named = countries_named(q)
         out, total = [], 0
         for r in self._since(hours, now):
-            if q and not any(q in str(r[c] or "").lower() for c in
+            if q and (r["cn"] or "").upper() not in named and not any(q in str(r[c] or "").lower() for c in
                              ("ip", "value", "scenario", "cn", "as_name", "as_number", "target", "uri", "message")):
                 continue
             if offset <= total < offset + limit:

@@ -225,8 +225,19 @@ def test_store_summary_upsert_and_prune(tmp_path):
     page = store.page(168, limit=2, offset=1, now=NOW)
     assert page["total"] == 4 and [a["id"] for a in page["alerts"]] == [2, 3]
     assert store.page(24, "198.51", now=NOW)["total"] == 1
+    assert [a["id"] for a in store.alerts(24, "united st", now=NOW)] == [2]  # country names, not just codes
+    assert [a["id"] for a in store.alerts(24, "Netherl", now=NOW)] == [1, 3]
 
     assert store.prune(2, NOW) == 1 and store.count() == 3
+
+
+def test_country_names_match_by_word_start():
+    from crowdsec_agent.store import countries_named
+    assert {"RU"} <= countries_named("russ") and "GB" in countries_named("kingdom")
+    assert "US" in countries_named("us") and not {"AU", "BY", "RU"} & countries_named("us")
+    assert countries_named("a") == set() and "HK" in countries_named("hong kong")
+    assert countries_named("uk") == {"GB"} and countries_named("China") == {"CN"}  # an exact name wins
+    assert {"US", "GB", "AE"} <= countries_named("united")
 
 
 def test_decision_rows_skip_expired():

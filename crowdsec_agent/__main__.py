@@ -76,8 +76,8 @@ def bus_tools(cfg: Config, runtime: Runtime, store: Store, snapshot: Snapshot) -
                 schema({"hours": HOURS}), summary),
         BusTool("crowdsec_alerts", "CrowdSec: recent alerts, newest first, each with its detail: start/stop, "
                 "bucket, every decision (origin, expiry), request context, and its first `events` events "
-                "(method, path, status, user agent, AppSec rule...). `query` filters by IP, scenario, country, "
-                "AS, target host or URI. `total` is how many match; page with `offset`. Pass `uuid` (from an earlier "
+                "(method, path, status, user agent, AppSec rule...). `query` filters by IP, scenario, country "
+                "(code or name), AS, target host or URI. `total` is how many match; page with `offset`. Pass `uuid` (from an earlier "
                 "answer) for one alert with all its stored events.",
                 schema({"hours": HOURS, "query": {"type": "string"},
                         "limit": {"type": "integer", "minimum": 1, "description": "Most alerts to return (default 50, max 200)."},
