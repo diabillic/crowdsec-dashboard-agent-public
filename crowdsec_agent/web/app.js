@@ -3,7 +3,9 @@
 
 const REFRESH_MS = 60000;
 const state = { hours: 24, query: "", overview: null, alerts: null, timer: null, searchTimer: null,
-  open: new Set(), details: new Map() };
+  open: new Set(), details: new Map(), page: 0, pageSize: 25, total: 0, alertsSeq: 0 };
+const PAGE_SIZES = [25, 50, 100];
+try { const n = +localStorage.getItem("pageSize"); if (PAGE_SIZES.includes(n)) state.pageSize = n; } catch { /* private mode */ }
 const $ = (id) => document.getElementById(id);
 const regionNames = (() => { try { return new Intl.DisplayNames(["en"], { type: "region" }); } catch { return null; } })();
 
@@ -332,9 +334,11 @@ function eventsTable(events, total) {
       td(other, "other"));
   });
   const head = el("tr", {}, el("th", { text: "Time" }), ...cols.map(([label]) => el("th", { text: label })), el("th", { text: "Other" }));
+  const width = { Time: "13.5em", Method: "5.5em", Status: "4.5em", Rule: "14%" };
+  const colgroup = colGroup(["Time", ...cols.map(([label]) => label), "Other"].map((label) => width[label]));
   return el("section", { class: "events" },
     el("h4", { text: total > events.length ? `Events (first ${events.length} of ${num(total)})` : `Events (${events.length})` }),
-    el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows))));
+    el("table", {}, colgroup, el("thead", {}, head), el("tbody", {}, ...rows)));
 }
 
 function detailRow(a, cols) {
@@ -351,12 +355,17 @@ function detailRow(a, cols) {
   return el("tr", { class: "detail" }, cell);
 }
 
+function colGroup(widths) { // set through the CSSOM: the page's CSP blocks style attributes
+  return el("colgroup", {}, ...widths.map((w) => { const c = el("col", {}); if (w) c.style.width = w; return c; }));
+}
+// Column widths for the fixed-layout alerts table: text wraps inside them, so nothing scrolls sideways.
+const ALERT_COLS = [["", "2em"], ["Time", "8.5em"], ["Source", "9.5em"], ["Country", "4.5em"], ["Network", "13%"],
+  ["Scenario", "15%"], ["Kind", "6.5em"], ["Target", "13%"], ["Path", null], ["Events", "4.5em"], ["Decision", "6.5em"]];
 function renderAlerts() {
   const list = (state.alerts || []);
-  const head = [{ label: "" }, { label: "Time" }, { label: "Source" }, { label: "Country" }, { label: "Network" }, { label: "Scenario" },
-    { label: "Kind" }, { label: "Target" }, { label: "Path" }, { label: "Events", num: true }, { label: "Decision" }];
+  const head = ALERT_COLS.map(([label]) => ({ label, num: label === "Events" }));
   const rows = [];
-  for (const a of list.slice(0, 300)) {
+  for (const a of list) {
     const open = state.open.has(a.uuid);
     rows.push(el("tr", { class: `alert-row${open ? " open" : ""}`, "data-uuid": a.uuid },
       el("td", {}, el("button", { type: "button", class: "disclose", "aria-expanded": String(open), "aria-label": "Details", title: "Details" })),
@@ -368,10 +377,78 @@ function renderAlerts() {
     if (open) rows.push(detailRow(a, head.length));
   }
   table("alerts", head, rows);
+  $("alerts").prepend(colGroup(ALERT_COLS.map(([, w]) => w)));
   $("alerts-hint").textContent = (state.query
-    ? `${num(list.length)}${list.length >= 1000 ? "+" : ""} alerts matching “${state.query}”, ${rangeLabel(state.hours)}`
-    : `Newest first, ${rangeLabel(state.hours)}`) + ". Click an alert for its details.";
-  $("alerts-more").textContent = list.length > 300 ? "Showing the newest 300. Narrow it down with the filter." : "";
+    ? `${num(state.total)} alerts matching “${state.query}”, ${rangeLabel(state.hours)}`
+    : `${num(state.total)} alerts, newest first, ${rangeLabel(state.hours)}`) + ". Click an alert for its details.";
+  renderPager("pager-top");
+  renderPager("pager-bottom");
+}
+
+// ---------- alert pages ----------
+function renderPager(id) {
+  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  const first = state.total ? state.page * state.pageSize + 1 : 0;
+  const last = Math.min(state.total, (state.page + 1) * state.pageSize);
+  const size = el("select", { "aria-label": "Alerts per page", "data-act": "size" },
+    ...PAGE_SIZES.map((n) => { const o = el("option", { value: n, text: `${n} per page` }); o.selected = n === state.pageSize; return o; }));
+  $(id).replaceChildren(
+    size,
+    el("span", { class: "range", text: state.total ? `${num(first)}–${num(last)} of ${num(state.total)}` : "No alerts" }),
+    el("button", { type: "button", "data-act": "first", disabled: state.page === 0 || null, title: "Newest", "aria-label": "First page", text: "«" }),
+    el("button", { type: "button", "data-act": "prev", disabled: state.page === 0 || null, text: "‹ Previous" }),
+    el("span", { class: "page", text: `Page ${num(state.page + 1)} of ${num(pages)}` }),
+    el("button", { type: "button", "data-act": "next", disabled: state.page >= pages - 1 || null, text: "Next ›" }),
+    el("button", { type: "button", "data-act": "last", disabled: state.page >= pages - 1 || null, title: "Oldest", "aria-label": "Last page", text: "»" }));
+}
+function alertsURL() {
+  return `/api/alerts?hours=${state.hours}&q=${encodeURIComponent(state.query)}&limit=${state.pageSize}&offset=${state.page * state.pageSize}`;
+}
+function takeAlerts(res) { // false when the page ran past the end (alerts aged out): step back and refetch
+  state.total = res.total;
+  const pages = Math.max(1, Math.ceil(res.total / state.pageSize));
+  if (state.page > pages - 1) { state.page = pages - 1; return false; }
+  state.alerts = res.alerts;
+  return true;
+}
+async function loadAlerts(scroll) {
+  const seq = ++state.alertsSeq;
+  $("alerts-card").classList.add("loading");
+  try {
+    const res = await getJSON(alertsURL());
+    if (seq !== state.alertsSeq) return; // a newer page request won
+    if (!takeAlerts(res)) {
+      const again = await getJSON(alertsURL());
+      if (seq !== state.alertsSeq) return;
+      takeAlerts(again);
+    }
+    renderAlerts();
+    if (scroll) $("alerts-card").scrollIntoView({ block: "start", behavior: reducedMotion.matches ? "auto" : "smooth" });
+  } catch (err) {
+    $("alerts-hint").textContent = `Couldn't load alerts: ${err.message}`;
+  } finally {
+    if (seq === state.alertsSeq) $("alerts-card").classList.remove("loading");
+  }
+}
+function onPager(evt) {
+  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  const act = evt.target.closest("[data-act]");
+  if (!act || act.disabled || act.dataset.act === "size") return;
+  state.page = { first: 0, prev: state.page - 1, next: state.page + 1, last: pages - 1 }[act.dataset.act];
+  state.page = Math.min(Math.max(state.page, 0), pages - 1);
+  loadAlerts(evt.currentTarget.id === "pager-bottom"); // from the bottom, jump back to the top of the list
+}
+function onPageSize(evt) {
+  if (evt.target.dataset.act !== "size") return;
+  const firstShown = state.page * state.pageSize;
+  state.pageSize = +evt.target.value;
+  state.page = Math.floor(firstShown / state.pageSize); // keep the first alert on screen
+  try { localStorage.setItem("pageSize", String(state.pageSize)); } catch { /* private mode */ }
+  loadAlerts(false);
+}
+for (const id of ["pager-top", "pager-bottom"]) {
+  $(id).addEventListener("click", onPager);
+  $(id).addEventListener("change", onPageSize);
 }
 $("alerts").addEventListener("click", (evt) => {
   if (evt.target.closest("a, tr.detail") || String(window.getSelection())) return; // links, the panel, selecting text
@@ -660,15 +737,16 @@ async function load() {
   const content = $("content");
   content.classList.add("loading"); // refetch keeps the frame
   try {
-    const q = encodeURIComponent(state.query);
+    const seq = ++state.alertsSeq; // supersedes a page request still in flight
     const [overview, alerts, places] = await Promise.all([
       getJSON(`/api/overview?hours=${state.hours}`),
-      getJSON(`/api/alerts?hours=${state.hours}&limit=1000&q=${q}`),
+      getJSON(alertsURL()),
       getJSON(`/api/map?hours=${state.hours}`),
       loadWorld(),
     ]);
+    // A page click while this was loading wins: its own request renders the alerts.
+    if (seq === state.alertsSeq && !takeAlerts(alerts)) takeAlerts(await getJSON(alertsURL()));
     state.overview = overview;
-    state.alerts = alerts.alerts;
     map.data = places;
     render();
   } catch (err) {
@@ -698,13 +776,14 @@ $("range").addEventListener("click", (evt) => {
   const b = evt.target.closest("button");
   if (!b) return;
   state.hours = +b.dataset.hours;
+  state.page = 0;
   for (const x of $("range").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
   writeHash();
   load();
 });
 $("search").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
-  state.searchTimer = setTimeout(() => { state.query = $("search").value.trim(); writeHash(); load(); }, 300);
+  state.searchTimer = setTimeout(() => { state.query = $("search").value.trim(); state.page = 0; writeHash(); load(); }, 300);
 });
 $("theme").addEventListener("click", () => {
   const dark = document.documentElement.dataset.theme

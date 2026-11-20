@@ -25,7 +25,7 @@ the page is plain HTML, CSS and JavaScript with no CDN.
 | AppSec rule hits, requests inspected and blocked | metrics |
 | Log sources: lines read, parsed and unparsed, flagged when **none** of a source's lines parse | metrics |
 | API clients: requests per bouncer and machine | metrics |
-| Searchable alert list (IP, country, network, scenario, host or path). Click an alert for its details: source and lookups (CrowdSec CTI, AbuseIPDB), timing and bucket, every decision with its origin and expiry, the request context, and its events (method, path, status, user agent, AppSec rule; the first 20) | alert history |
+| Searchable alert list (IP, country, network, scenario, host or path), in pages of 25, 50 or 100 with Previous/Next at the top and bottom. Click an alert for its details: source and lookups (CrowdSec CTI, AbuseIPDB), timing and bucket, every decision with its origin and expiry, the request context, and its events (method, path, status, user agent, AppSec rule; the first 20) | alert history |
 
 Pick 24 hours, 7, 30 or 90 days at the top; everything on the page follows. The page refreshes
 every minute, and its light/dark theme follows the system unless you switch it.
@@ -177,7 +177,7 @@ answer questions like "what attacked us today?" with live data:
 | Tool | Returns |
 |---|---|
 | `crowdsec_summary` | Totals, timeline and top lists for the last `hours`, plus decisions by origin and AppSec counters |
-| `crowdsec_alerts` | Recent alerts, optionally filtered by IP, scenario, country, network, host or path |
+| `crowdsec_alerts` | Recent alerts, optionally filtered by IP, scenario, country, network, host or path, each with its details (timing, bucket, decisions, request context and the first `events` events, default 3). `total` counts the matches and `offset` pages through them. `uuid` returns one alert with all 20 stored events; `details: false` gives the plain list |
 | `crowdsec_decisions` | Active local bans |
 | `crowdsec_sources` | Log sources with parse counts, bouncer and machine requests |
 | `agent_status`, `agent_run_check` | The agent's own state; `agent_run_check` syncs now |

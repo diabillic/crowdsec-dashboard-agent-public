@@ -20,6 +20,19 @@ log = logging.getLogger("crowdsec_agent")
 SYNC_GRACE = 5 * 60  # longest a sync (a first backfill of HISTORY_DAYS included) should take
 
 HOURS = {"type": "integer", "minimum": 1, "description": "How far back, in hours (default 24)."}
+# Event metadata that repeats the alert's own source (GeoIP, IP) or time; left out of tool answers.
+EVENT_NOISE = {"source_ip", "timestamp", "IsInEU", "IsoCode", "ASNNumber", "ASNOrg", "SourceRange"}
+
+
+def for_assistant(alert: dict, events: int) -> dict:
+    """An alert with its detail made compact: context and event metadata as objects, at most `events`
+    events, and how many the agent keeps (`eventsKept`) next to how many CrowdSec counted (`events`)."""
+    d = alert.get("detail")
+    if d:
+        alert["detail"] = {**d, "context": dict(d["context"]), "eventsKept": len(d["events"]),
+                           "events": [{"at": e["at"], "meta": {k: v for k, v in e["meta"] if k not in EVENT_NOISE}}
+                                      for e in d["events"][:events]]}
+    return alert
 
 
 def bus_tools(cfg: Config, runtime: Runtime, store: Store, snapshot: Snapshot) -> list[BusTool]:
@@ -37,8 +50,17 @@ def bus_tools(cfg: Config, runtime: Runtime, store: Store, snapshot: Snapshot) -
                 "allActiveDecisions": data.get("decisions"), "appsec": data.get("appsec"),
                 "crowdsecVersion": data.get("version")}
 
-    def alerts(hours: int = 24, query: str = "", limit: int = 50) -> dict:
-        return {"alerts": store.alerts(clamp(hours), query, min(max(int(limit), 1), 200))}
+    def alerts(hours: int = 24, query: str = "", limit: int = 50, details: bool = True, events: int | None = None,
+               uuid: str = "", offset: int = 0) -> dict:
+        if uuid:
+            found = store.alert(uuid)
+            return {"alert": for_assistant(found, 20 if events is None else min(max(int(events), 0), 20)) if found else None}
+        page = store.page(clamp(hours), query, min(max(int(limit), 1), 200), max(int(offset), 0), detail=bool(details))
+        if details:
+            n = 3 if events is None else min(max(int(events), 0), 20)
+            page["alerts"] = [for_assistant(r, n) for r in page["alerts"]]
+            page["note"] = "detail is null for alerts stored before the agent kept details"
+        return page
 
     def decisions(limit: int = 100) -> dict:
         rows = snapshot.view()["decisions"]
@@ -52,9 +74,18 @@ def bus_tools(cfg: Config, runtime: Runtime, store: Store, snapshot: Snapshot) -
         BusTool("crowdsec_summary", "CrowdSec: alert totals, timeline, top countries/scenarios/AS/targets/IPs for "
                 "the last `hours`, plus active decisions by origin and AppSec counters.",
                 schema({"hours": HOURS}), summary),
-        BusTool("crowdsec_alerts", "CrowdSec: recent alerts, newest first. `query` filters by IP, scenario, "
-                "country, AS, target host or URI.",
-                schema({"hours": HOURS, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1}}),
+        BusTool("crowdsec_alerts", "CrowdSec: recent alerts, newest first, each with its detail: start/stop, "
+                "bucket, every decision (origin, expiry), request context, and its first `events` events "
+                "(method, path, status, user agent, AppSec rule...). `query` filters by IP, scenario, country, "
+                "AS, target host or URI. `total` is how many match; page with `offset`. Pass `uuid` (from an earlier "
+                "answer) for one alert with all its stored events.",
+                schema({"hours": HOURS, "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "description": "Most alerts to return (default 50, max 200)."},
+                        "details": {"type": "boolean", "description": "Include each alert's detail (default true)."},
+                        "events": {"type": "integer", "minimum": 0, "maximum": 20,
+                                   "description": "Events per alert (default 3; 20 with `uuid`)."},
+                        "offset": {"type": "integer", "minimum": 0, "description": "Skip this many matches (paging)."},
+                        "uuid": {"type": "string", "description": "One alert by its uuid."}}),
                 alerts),
         BusTool("crowdsec_decisions", "CrowdSec: active local decisions (bans) with country, AS, scenario and "
                 "expiry. Community blocklist decisions are only counted, in crowdsec_summary.",

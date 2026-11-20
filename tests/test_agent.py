@@ -126,6 +126,33 @@ def test_alert_detail_keeps_timing_decisions_context_and_events(tmp_path):
     assert store.alert("nope") is None
 
 
+def test_alerts_tool_returns_compact_details(tmp_path):
+    from crowdsec_agent.__main__ import bus_tools
+    from crowdsec_agent.bus import Runtime
+
+    a = alert(1, kind="crowdsec", decision=BAN)
+    a["events"] = [{"timestamp": iso(NOW - 60 + i), "meta": [{"key": "http_path", "value": f"/p{i}"},
+                                                           {"key": "IsoCode", "value": "NL"}]} for i in range(25)]
+    store = Store(str(tmp_path / "a.db"))
+    store.upsert([a, alert(2, ago=120)], time.time())
+    tools = {t.name: t for t in bus_tools(cfg(tmp_path), Runtime("crowdsec"), store, Snapshot())}
+    fn = tools["crowdsec_alerts"].fn
+    assert set(tools["crowdsec_alerts"].input_schema["properties"]) >= {"details", "events", "uuid"}
+
+    got = fn()["alerts"]
+    first = next(x for x in got if x["uuid"] == "u-1")
+    d = first["detail"]
+    assert first["machine"] == "localhost" and d["context"] == {"target_uri": ["/.env"]}
+    assert d["eventsKept"] == 20 and d["decisions"][0]["type"] == "ban"
+    assert [e["meta"] for e in d["events"]] == [{"http_path": f"/p{i}"} for i in range(3)]  # GeoIP noise dropped
+    assert len(fn(events=0)["alerts"][0]["detail"]["events"]) == 0
+    assert "detail" not in fn(details=False)["alerts"][0]
+    assert fn(limit=1)["total"] == 2 and [x["uuid"] for x in fn(limit=1, offset=1)["alerts"]] == ["u-2"]
+    one = fn(uuid="u-1")["alert"]
+    assert len(one["detail"]["events"]) == 20 and one["detail"]["events"][19]["meta"] == {"http_path": "/p19"}
+    assert fn(uuid="nope") == {"alert": None}
+
+
 def test_store_map_groups_places_and_categories(tmp_path):
     store = Store(str(tmp_path / "a.db"))
     store.upsert([alert(1), alert(2, lat=52.3901, lon=4.9011),  # same 0.1° cell
@@ -195,6 +222,9 @@ def test_store_summary_upsert_and_prune(tmp_path):
     assert len(store.summary(168, NOW)["timeline"]["starts"]) == 28
     assert [a["id"] for a in store.alerts(24, "198.51", now=NOW)] == [2]
     assert [a["id"] for a in store.alerts(24, "vpatch-env", now=NOW)] == [1, 2]
+    page = store.page(168, limit=2, offset=1, now=NOW)
+    assert page["total"] == 4 and [a["id"] for a in page["alerts"]] == [2, 3]
+    assert store.page(24, "198.51", now=NOW)["total"] == 1
 
     assert store.prune(2, NOW) == 1 and store.count() == 3
 
@@ -348,7 +378,9 @@ def test_dashboard_serves_page_and_api(web):
     assert get(base + "/app.js")[0] == 200 and get(base + "/app.css")[0] == 200
     data = json.loads(get(base + "/api/overview?hours=24")[2])
     assert data["summary"]["total"] == 1 and data["decisionsTotal"] == 1 and data["agent"]["revision"] == "test"
-    assert json.loads(get(base + "/api/alerts?hours=99999&q=203.0")[2])["alerts"][0]["id"] == 1
+    listed = json.loads(get(base + "/api/alerts?hours=99999&q=203.0&limit=10&offset=0")[2])
+    assert listed["alerts"][0]["id"] == 1 and listed["total"] == 1
+    assert json.loads(get(base + "/api/alerts?offset=5")[2]) == {"alerts": [], "total": 1, "offset": 5}
     detail = json.loads(get(base + "/api/alert?uuid=u-1")[2])
     assert detail["detail"]["events"][0]["meta"][1] == ["uri", "/.env"]
     with pytest.raises(urllib.error.HTTPError) as err:

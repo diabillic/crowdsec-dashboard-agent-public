@@ -94,11 +94,16 @@
       <div class="table-wrap"><table id="clients"></table></div>
     </article>
 
-    <article class="card">
-      <h2>Alerts</h2>
-      <p class="hint" id="alerts-hint"></p>
-      <div class="table-wrap"><table id="alerts"></table></div>
-      <div class="more" id="alerts-more"></div>
+    <article class="card" id="alerts-card">
+      <div class="card-head">
+        <div>
+          <h2>Alerts</h2>
+          <p class="hint" id="alerts-hint"></p>
+        </div>
+        <nav class="pager" id="pager-top" aria-label="Alert pages"></nav>
+      </div>
+      <div class="table-wrap"><table id="alerts" class="alerts"></table></div>
+      <nav class="pager bottom" id="pager-bottom" aria-label="Alert pages"></nav>
     </article>
   </section>
 </main>

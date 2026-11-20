@@ -2,7 +2,7 @@
 
   GET /                       the dashboard
   GET /api/overview?hours=24  status, alert summary for the range, active decisions, metrics
-  GET /api/alerts?hours=24&q= alerts in the range, newest first, optionally filtered
+  GET /api/alerts?hours=24&q=&limit=50&offset=0  a page of the alerts in the range, newest first, and the total
   GET /api/alert?uuid=        one alert with its detail: timing, decisions, request context, events
   GET /api/map?hours=24       alert counts per place (banned / blocked / flagged) for the heat map
   GET /api/live?after=<cursor> alerts stored since the cursor, for the map's live pings (no cursor: the latest few)
@@ -119,10 +119,11 @@ def make_handler(store: Store, snapshot: Snapshot, password: str, max_hours: int
                 if url.path == "/api/alerts":
                     query = (params.get("q") or [""])[0][:200]
                     try:
-                        limit = min(max(int((params.get("limit") or ["500"])[0]), 1), 2000)
+                        limit = min(max(int((params.get("limit") or ["50"])[0]), 1), 500)
+                        offset = max(int((params.get("offset") or ["0"])[0]), 0)
                     except ValueError:
-                        limit = 500
-                    return self._json(200, {"alerts": store.alerts(self._hours(params), query, limit)})
+                        limit, offset = 50, 0
+                    return self._json(200, store.page(self._hours(params), query, limit, offset))
                 if url.path == "/api/alert":
                     found = store.alert((params.get("uuid") or [""])[0][:100])
                     return self._json(200, found) if found else self._json(404, {"error": "no such alert"})

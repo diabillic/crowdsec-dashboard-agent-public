@@ -306,15 +306,26 @@ class Store:
         out["detail"] = json.loads(r["detail"]) if r["detail"] else None
         return out
 
-    def alerts(self, hours: int, query: str = "", limit: int = 500, now: float | None = None) -> list[dict]:
+    def alerts(self, hours: int, query: str = "", limit: int = 500, now: float | None = None,
+               detail: bool = False, offset: int = 0) -> list[dict]:
+        """Alerts in the range, newest first; with `detail`, also the machine and the parsed detail."""
+        return self.page(hours, query, limit, offset, now, detail)["alerts"]
+
+    def page(self, hours: int, query: str = "", limit: int = 50, offset: int = 0, now: float | None = None,
+             detail: bool = False) -> dict:
+        """One page of the alerts matching `query`, newest first, and how many match in all."""
         now = now or time.time()
         q = query.strip().lower()
-        out = []
+        out, total = [], 0
         for r in self._since(hours, now):
             if q and not any(q in str(r[c] or "").lower() for c in
                              ("ip", "value", "scenario", "cn", "as_name", "as_number", "target", "uri", "message")):
                 continue
-            out.append({c: r[c] for c in COLUMNS if c not in LIST_SKIP})
-            if len(out) >= limit:
-                break
-        return out
+            if offset <= total < offset + limit:
+                item = {c: r[c] for c in COLUMNS if c not in LIST_SKIP}
+                if detail:
+                    item["machine"] = r["machine"]
+                    item["detail"] = json.loads(r["detail"]) if r["detail"] else None
+                out.append(item)
+            total += 1
+        return {"alerts": out, "total": total, "offset": offset}

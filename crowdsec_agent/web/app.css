@@ -226,3 +226,26 @@ tr.detail:hover td { background: var(--wash); }
 .detail-body td.clip { max-width: 360px; }
 @media (max-width: 760px) { tr.detail > td { padding-left: 12px; } }
 @media (prefers-reduced-motion: reduce) { button.disclose::before { transition: none; } }
+
+/* alerts: fixed column widths, text wraps instead of scrolling sideways */
+table.alerts { table-layout: fixed; }
+table.alerts td { overflow-wrap: anywhere; }
+table.alerts td.clip, table.alerts td.mono { white-space: normal; max-width: none; overflow: visible; text-overflow: clip; }
+table.alerts th { white-space: normal; }
+@media (max-width: 760px) { table.alerts { min-width: 760px; } }
+.detail-body .events table { table-layout: fixed; width: 100%; }
+.detail-body .events td { overflow-wrap: anywhere; }
+.detail-body .events td.clip, .detail-body .events td.mono { white-space: normal; max-width: none; overflow: visible; text-overflow: clip; }
+.detail-body td.other { min-width: 0; }
+
+/* pager */
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; font-size: 12px; color: var(--text-2); }
+.pager.bottom { margin-top: 10px; }
+.pager button, .pager select { font: inherit; color: var(--text); background: var(--surface); border: 0; border-radius: 6px;
+                               box-shadow: inset 0 0 0 1px var(--ring); padding: 4px 10px; cursor: pointer; }
+.pager button:hover:not(:disabled) { background: var(--wash); }
+.pager button:disabled { color: var(--muted); cursor: default; opacity: 0.6; }
+.pager .range { margin: 0 6px; font-variant-numeric: tabular-nums; }
+.pager .page { margin: 0 4px; font-variant-numeric: tabular-nums; }
+#alerts-card.loading { opacity: 0.55; transition: opacity 0.2s; }
+.detail-body .events td.when, table.alerts td.when { white-space: normal; }
