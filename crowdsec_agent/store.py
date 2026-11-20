@@ -23,16 +23,20 @@ CREATE TABLE IF NOT EXISTS alerts (
     scope TEXT, value TEXT, ip TEXT, cn TEXT, as_name TEXT, as_number TEXT, ip_range TEXT,
     target TEXT, uri TEXT, events INTEGER, simulated INTEGER,
     decision TEXT, decision_until REAL,
-    lat REAL, lon REAL, seen_at REAL
+    lat REAL, lon REAL, seen_at REAL, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS alerts_created ON alerts (created_at);
 """
 # Columns added after the first release; older databases get them on open.
-ADDED = {"lat": "REAL", "lon": "REAL", "seen_at": "REAL"}
+ADDED = {"lat": "REAL", "lon": "REAL", "seen_at": "REAL", "detail": "TEXT"}
 
 COLUMNS = ("uuid", "id", "created_at", "scenario", "kind", "message", "machine", "scope", "value", "ip", "cn",
            "as_name", "as_number", "ip_range", "target", "uri", "events", "simulated", "decision", "decision_until",
-           "lat", "lon")
+           "lat", "lon", "detail")
+# Left out of alert lists: the detail is fetched per alert (/api/alert), and the machine is in it.
+LIST_SKIP = ("machine", "detail")
+# The detail keeps this many events per alert (an alert can carry hundreds) and trims long values.
+DETAIL_EVENTS, DETAIL_VALUE = 20, 500
 # How far back the live feed looks: a first sync stores weeks of alerts at once, and those aren't news.
 LIVE_WINDOW = 2 * 3600
 
@@ -62,6 +66,41 @@ def _coord(value, limit: float) -> float | None:
     except (TypeError, ValueError):
         return None
     return round(v, 3) if -limit <= v <= limit else None
+
+
+def _pairs(items: list | None) -> list[list]:
+    """A meta list as [key, value] pairs, values trimmed; alert-level values (JSON lists) become lists."""
+    out = []
+    for m in items or []:
+        key, value = m.get("key"), m.get("value")
+        if not key or value in (None, ""):
+            continue
+        if isinstance(value, str) and value.startswith("["):
+            try:
+                value = [str(v)[:DETAIL_VALUE] for v in json.loads(value)][:10]
+            except ValueError:
+                pass
+        out.append([key, value if isinstance(value, list) else str(value)[:DETAIL_VALUE]])
+    return out
+
+
+def detail(alert: dict, now: float) -> dict:
+    """What the table has no room for: timing, the bucket, every decision, the request context and
+    the first DETAIL_EVENTS events with their metadata."""
+    events = alert.get("events") or []
+    return {
+        "startedAt": _ts(alert.get("start_at")),
+        "stoppedAt": _ts(alert.get("stop_at")),
+        "capacity": alert.get("capacity"),
+        "leakspeed": alert.get("leakspeed") or "",
+        "scenarioVersion": alert.get("scenario_version") or "",
+        "context": _pairs(alert.get("meta")),
+        "decisions": [{"type": d.get("type", ""), "origin": d.get("origin", ""), "scope": d.get("scope", ""),
+                       "value": d.get("value", ""), "duration": go_duration(d.get("duration", "")),
+                       "until": now + go_duration(d.get("duration", "")), "simulated": bool(d.get("simulated"))}
+                      for d in alert.get("decisions") or []],
+        "events": [{"at": _ts(e.get("timestamp")), "meta": _pairs(e.get("meta"))} for e in events[:DETAIL_EVENTS]],
+    }
 
 
 def _meta(items: list | None, key: str) -> str:
@@ -117,6 +156,7 @@ def row(alert: dict, now: float) -> dict:
         "decision_until": now + go_duration(first.get("duration", "")) if first else None,
         "lat": lat if lon is not None else None,
         "lon": lon if lat is not None else None,
+        "detail": json.dumps(detail(alert, now), separators=(",", ":")),
     }
 
 
@@ -256,6 +296,16 @@ class Store:
                    "category": category(r["kind"], r["decision"])} for r in rows]
         return {"cursor": cursor, "events": events}
 
+    def alert(self, uuid: str) -> dict | None:
+        """One alert with everything stored about it; `detail` is None for alerts stored before it existed."""
+        with self.lock:
+            r = self.db.execute("SELECT * FROM alerts WHERE uuid = ?", (uuid,)).fetchone()
+        if r is None:
+            return None
+        out = {c: r[c] for c in COLUMNS}
+        out["detail"] = json.loads(r["detail"]) if r["detail"] else None
+        return out
+
     def alerts(self, hours: int, query: str = "", limit: int = 500, now: float | None = None) -> list[dict]:
         now = now or time.time()
         q = query.strip().lower()
@@ -264,7 +314,7 @@ class Store:
             if q and not any(q in str(r[c] or "").lower() for c in
                              ("ip", "value", "scenario", "cn", "as_name", "as_number", "target", "uri", "message")):
                 continue
-            out.append({c: r[c] for c in COLUMNS if c not in ("machine",)})
+            out.append({c: r[c] for c in COLUMNS if c not in LIST_SKIP})
             if len(out) >= limit:
                 break
         return out

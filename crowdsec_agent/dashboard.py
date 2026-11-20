@@ -3,6 +3,7 @@
   GET /                       the dashboard
   GET /api/overview?hours=24  status, alert summary for the range, active decisions, metrics
   GET /api/alerts?hours=24&q= alerts in the range, newest first, optionally filtered
+  GET /api/alert?uuid=        one alert with its detail: timing, decisions, request context, events
   GET /api/map?hours=24       alert counts per place (banned / blocked / flagged) for the heat map
   GET /api/live?after=<cursor> alerts stored since the cursor, for the map's live pings (no cursor: the latest few)
   GET /health                 200 while the server runs (container health; never needs auth)
@@ -122,6 +123,9 @@ def make_handler(store: Store, snapshot: Snapshot, password: str, max_hours: int
                     except ValueError:
                         limit = 500
                     return self._json(200, {"alerts": store.alerts(self._hours(params), query, limit)})
+                if url.path == "/api/alert":
+                    found = store.alert((params.get("uuid") or [""])[0][:100])
+                    return self._json(200, found) if found else self._json(404, {"error": "no such alert"})
                 if url.path == "/api/map":
                     return self._json(200, store.map(self._hours(params)))
                 if url.path == "/api/live":

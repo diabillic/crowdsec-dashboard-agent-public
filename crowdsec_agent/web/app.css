@@ -202,3 +202,27 @@ i.c-flagged { background: var(--series-2); }
 @media (max-width: 1100px) { .map-layout { grid-template-columns: minmax(0, 1fr); } .feed ol { columns: 2; column-gap: 16px; } .feed li { break-inside: avoid; } }
 @media (max-width: 760px) { .feed ol { columns: 1; } .map-scale { margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .pill.live.ok .dot, .feed li.fresh { animation: none; } }
+
+/* alert detail */
+tr.alert-row { cursor: pointer; }
+tr.alert-row.open td { background: var(--wash); border-bottom-color: transparent; }
+button.disclose { border: 0; background: none; padding: 0 2px; cursor: pointer; color: var(--muted); font: inherit; line-height: 1; }
+button.disclose::before { content: "▸"; display: inline-block; transition: transform 0.15s; }
+button.disclose[aria-expanded="true"]::before { transform: rotate(90deg); }
+tr.detail > td { background: var(--wash); padding: 4px 12px 16px 30px; }
+tr.detail:hover td { background: var(--wash); }
+.detail-body .msg { margin: 0 0 10px; color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
+.detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px 24px; }
+.detail-body h4 { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 0 0 4px; }
+.detail-body dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0; font-size: 12px; }
+.detail-body dt { color: var(--muted); }
+.detail-body dd { margin: 0; overflow-wrap: anywhere; }
+.detail-body a { color: var(--series-1); }
+.detail-body .events { margin-top: 14px; }
+.detail-body .events table { font-size: 12px; background: var(--surface); border-radius: 8px; }
+.detail-body .events td, .detail-body .events th { padding: 4px 8px; }
+.detail-body .events tr:hover td { background: var(--wash); }
+.detail-body td.other { color: var(--text-2); font-size: 11px; min-width: 240px; overflow-wrap: anywhere; }
+.detail-body td.clip { max-width: 360px; }
+@media (max-width: 760px) { tr.detail > td { padding-left: 12px; } }
+@media (prefers-reduced-motion: reduce) { button.disclose::before { transition: none; } }

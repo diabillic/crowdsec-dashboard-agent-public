@@ -2,7 +2,8 @@
 "use strict";
 
 const REFRESH_MS = 60000;
-const state = { hours: 24, query: "", overview: null, alerts: null, timer: null, searchTimer: null };
+const state = { hours: 24, query: "", overview: null, alerts: null, timer: null, searchTimer: null,
+  open: new Set(), details: new Map() };
 const $ = (id) => document.getElementById(id);
 const regionNames = (() => { try { return new Intl.DisplayNames(["en"], { type: "region" }); } catch { return null; } })();
 
@@ -259,21 +260,127 @@ function renderMetrics(o) {
   table("clients", [{ label: "Name" }, { label: "Kind" }, { label: "Requests", num: true }], clients);
 }
 
+// ---------- alert detail: a row that opens below its alert ----------
+const EVENT_COLS = [ // event meta shown as columns when any event has them; the rest go under "Other"
+  ["Method", ["http_verb", "method"]], ["Path", ["http_path", "uri", "target_uri"]], ["Status", ["http_status", "status"]],
+  ["Rule", ["rule_name"]], ["User agent", ["http_user_agent", "user_agent"]],
+];
+const EVENT_SKIP = new Set(["source_ip", "timestamp", "IsInEU", "IsoCode", "ASNNumber", "ASNOrg", "SourceRange"]);
+const fmtFull = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const full = (ts) => (ts ? fmtFull.format(new Date(ts * 1000)) : "–");
+function span(seconds) {
+  if (seconds === null || seconds === undefined || seconds < 0) return "–";
+  if (seconds < 1) return "under a second";
+  if (seconds < 120) return `${Math.round(seconds)} s`;
+  if (seconds < 7200) return `${Math.round(seconds / 60)} min`;
+  if (seconds < 172800) return `${Math.round(seconds / 360) / 10} h`;
+  return `${Math.round(seconds / 8640) / 10} days`;
+}
+const joined = (v) => (Array.isArray(v) ? v.join(", ") : String(v));
+function dl(title, pairs) {
+  const rows = pairs.filter((p) => p && p[1] !== "" && p[1] !== null && p[1] !== undefined);
+  if (!rows.length) return null;
+  return el("section", {}, el("h4", { text: title }),
+    el("dl", {}, ...rows.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", {}, v instanceof Node ? v : String(v))])));
+}
+function link(href, text) { return el("a", { href, text, target: "_blank", rel: "noopener noreferrer" }); }
+
+function detailPanel(a) {
+  const d = a.detail;
+  const ip = a.ip || (a.scope && a.scope.toLowerCase() === "ip" ? a.value : "");
+  const lookups = ip ? el("span", { class: "links" }, link(`https://app.crowdsec.net/cti/${encodeURIComponent(ip)}`, "CrowdSec CTI"),
+    " · ", link(`https://www.abuseipdb.com/check/${encodeURIComponent(ip)}`, "AbuseIPDB")) : null;
+  const where = a.lat !== null && a.lat !== undefined ? `${a.lat.toFixed(2)}, ${a.lon.toFixed(2)}` : a.cn ? "Country only" : "";
+  const sections = [
+    dl("Source", [["Address", `${a.value || a.ip}${a.scope && a.scope !== "Ip" ? ` (${a.scope})` : ""}`], ["Network", a.ip_range],
+      ["AS", a.as_name ? `${a.as_name}${a.as_number ? ` (AS${a.as_number})` : ""}` : ""],
+      ["Country", a.cn ? `${flag(a.cn)} ${country(a.cn)}` : ""], ["Location", where], ["Look up", lookups]]),
+    dl("Detection", [["Scenario", `${a.scenario}${d && d.scenarioVersion ? ` (v${d.scenarioVersion})` : ""}`],
+      ["Kind", a.kind === "waf" ? "AppSec (WAF) block" : "Scenario alert"], ["Machine", a.machine],
+      ["Started", d ? full(d.startedAt) : full(a.created_at)], ["Ended", d && d.stoppedAt ? full(d.stoppedAt) : ""],
+      ["Lasted", d && d.startedAt && d.stoppedAt ? span(d.stoppedAt - d.startedAt) : ""], ["Events", num(a.events)],
+      ["Bucket", d && d.capacity ? `capacity ${d.capacity}, leaks ${d.leakspeed || "?"}` : ""],
+      ["Simulated", a.simulated ? "Yes (simulation mode: nothing enforced)" : ""]]),
+  ];
+  if (d && d.decisions.length) {
+    sections.push(dl(d.decisions.length === 1 ? "Decision" : `Decisions (${d.decisions.length})`, d.decisions.map((x) => [
+      `${x.type}${x.simulated ? " (simulated)" : ""}`,
+      `${x.scope} ${x.value}, ${span(x.duration)}, from ${x.origin}; ` +
+        (x.until > Date.now() / 1000 ? `expires in ${until(x.until)}` : `expired ${ago(x.until)}`)])));
+  } else {
+    sections.push(dl("Decision", [["None", a.kind === "waf" ? "The request was blocked; the source wasn't banned" : "Alert only, nothing enforced"]]));
+  }
+  if (d && d.context.length) sections.push(dl("Context", d.context.map(([k, v]) => [k, joined(v)])));
+
+  const body = [el("p", { class: "msg", text: a.message || "" }), el("div", { class: "detail-grid" }, ...sections.filter(Boolean))];
+  if (!d) body.push(el("p", { class: "muted", text: "Stored before the agent kept full details. Events and context are recorded for alerts from now on." }));
+  else if (d.events.length) body.push(eventsTable(d.events, a.events));
+  return el("div", { class: "detail-body" }, ...body);
+}
+
+function eventsTable(events, total) {
+  const pick = (meta, keys) => { for (const k of keys) { const m = meta.find((p) => p[0] === k); if (m) return m; } return null; };
+  const cols = EVENT_COLS.filter(([, keys]) => events.some((e) => pick(e.meta, keys)));
+  const used = new Set(cols.flatMap(([, keys]) => keys));
+  const rows = events.map((e) => {
+    const other = e.meta.filter(([k]) => !used.has(k) && !EVENT_SKIP.has(k)).map(([k, v]) => `${k}=${joined(v)}`).join("  ·  ");
+    return el("tr", {}, td(e.at ? fmtFull.format(new Date(e.at * 1000)) : "", "when"),
+      ...cols.map(([label, keys]) => {
+        const m = pick(e.meta, keys), text = m ? joined(m[1]) : "";
+        return td(text, label === "Path" || label === "User agent" ? "clip mono" : "mono", text);
+      }),
+      td(other, "other"));
+  });
+  const head = el("tr", {}, el("th", { text: "Time" }), ...cols.map(([label]) => el("th", { text: label })), el("th", { text: "Other" }));
+  return el("section", { class: "events" },
+    el("h4", { text: total > events.length ? `Events (first ${events.length} of ${num(total)})` : `Events (${events.length})` }),
+    el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows))));
+}
+
+function detailRow(a, cols) {
+  const cell = el("td", { colspan: cols });
+  const d = state.details.get(a.uuid);
+  if (d) cell.append(detailPanel(d));
+  else {
+    cell.append(el("div", { class: "muted", text: "Loading…" }));
+    getJSON(`/api/alert?uuid=${encodeURIComponent(a.uuid)}`).then((found) => {
+      state.details.set(a.uuid, found);
+      if (cell.isConnected) cell.replaceChildren(detailPanel(found));
+    }).catch((err) => cell.replaceChildren(el("div", { class: "warn-text", text: `Couldn't load the details: ${err.message}` })));
+  }
+  return el("tr", { class: "detail" }, cell);
+}
+
 function renderAlerts() {
   const list = (state.alerts || []);
-  const rows = list.slice(0, 300).map((a) => el("tr", {},
-    td(when(a.created_at), "when"), td(a.value || a.ip, "mono"), countryCell(a.cn),
-    td(a.as_name, "clip", a.as_name ? `${a.as_name} (AS${a.as_number})` : ""), td(short(a.scenario), "clip", a.message || a.scenario),
-    el("td", {}, kindBadge(a.kind)), td(a.target, "clip", a.target), td(a.uri, "clip mono", a.uri),
-    el("td", {}, a.decision ? el("span", { class: `badge ${a.decision === "ban" ? "ban" : ""}`, text: a.decision }) : null,
-      a.simulated ? el("span", { class: "badge", text: "simulated" }) : null)));
-  table("alerts", [{ label: "Time" }, { label: "Source" }, { label: "Country" }, { label: "Network" }, { label: "Scenario" },
-    { label: "Kind" }, { label: "Target" }, { label: "Path" }, { label: "Decision" }], rows);
-  $("alerts-hint").textContent = state.query
+  const head = [{ label: "" }, { label: "Time" }, { label: "Source" }, { label: "Country" }, { label: "Network" }, { label: "Scenario" },
+    { label: "Kind" }, { label: "Target" }, { label: "Path" }, { label: "Events", num: true }, { label: "Decision" }];
+  const rows = [];
+  for (const a of list.slice(0, 300)) {
+    const open = state.open.has(a.uuid);
+    rows.push(el("tr", { class: `alert-row${open ? " open" : ""}`, "data-uuid": a.uuid },
+      el("td", {}, el("button", { type: "button", class: "disclose", "aria-expanded": String(open), "aria-label": "Details", title: "Details" })),
+      td(when(a.created_at), "when"), td(a.value || a.ip, "mono"), countryCell(a.cn),
+      td(a.as_name, "clip", a.as_name ? `${a.as_name} (AS${a.as_number})` : ""), td(short(a.scenario), "clip", a.message || a.scenario),
+      el("td", {}, kindBadge(a.kind)), td(a.target, "clip", a.target), td(a.uri, "clip mono", a.uri), td(num(a.events), "num"),
+      el("td", {}, a.decision ? el("span", { class: `badge ${a.decision === "ban" ? "ban" : ""}`, text: a.decision }) : null,
+        a.simulated ? el("span", { class: "badge", text: "simulated" }) : null)));
+    if (open) rows.push(detailRow(a, head.length));
+  }
+  table("alerts", head, rows);
+  $("alerts-hint").textContent = (state.query
     ? `${num(list.length)}${list.length >= 1000 ? "+" : ""} alerts matching “${state.query}”, ${rangeLabel(state.hours)}`
-    : `Newest first, ${rangeLabel(state.hours)}`;
-  $("alerts-more").textContent = list.length > 300 ? `Showing the newest 300. Narrow it down with the filter.` : "";
+    : `Newest first, ${rangeLabel(state.hours)}`) + ". Click an alert for its details.";
+  $("alerts-more").textContent = list.length > 300 ? "Showing the newest 300. Narrow it down with the filter." : "";
 }
+$("alerts").addEventListener("click", (evt) => {
+  if (evt.target.closest("a, tr.detail") || String(window.getSelection())) return; // links, the panel, selecting text
+  const row = evt.target.closest("tr.alert-row");
+  if (!row) return;
+  const uuid = row.dataset.uuid;
+  if (state.open.has(uuid)) state.open.delete(uuid); else state.open.add(uuid);
+  renderAlerts();
+});
 
 function render() {
   const o = state.overview;

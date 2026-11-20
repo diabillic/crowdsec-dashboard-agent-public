@@ -30,7 +30,8 @@ def alert(n, ago=60, kind="waf", ip="203.0.113.7", cn="NL", decision=None, scena
         "source": {"scope": "Ip", "value": ip, "ip": ip, "cn": cn, "as_name": "EXAMPLE-NET", "as_number": "64500",
                    "range": "203.0.113.0/24", "latitude": lat, "longitude": lon},
         "meta": [{"key": "target_uri", "value": '["/.env"]'}],
-        "events": [{"meta": [{"key": "target_fqdn", "value": "app.example.com"}, {"key": "uri", "value": "/.env"}]}],
+        "events": [{"timestamp": iso(NOW - ago), "meta": [{"key": "target_fqdn", "value": "app.example.com"},
+                                                           {"key": "uri", "value": "/.env"}]}],
         "decisions": [decision] if decision else None,
     }
 
@@ -104,6 +105,27 @@ def test_row_extracts_source_target_and_decision():
     assert row(alert(3, lat=None, lon=None), NOW)["lon"] is None
 
 
+def test_alert_detail_keeps_timing_decisions_context_and_events(tmp_path):
+    a = alert(1, kind="crowdsec", decision=BAN, scenario="crowdsecurity/http-probing")
+    a.update(stop_at=iso(NOW - 30), capacity=10, leakspeed="10s", scenario_version="0.4", events_count=45,
+             events=[{"timestamp": iso(NOW - 60 + i), "meta": [{"key": "http_verb", "value": "GET"},
+                                                               {"key": "http_path", "value": f"/p{i}" + "x" * 600}]}
+                     for i in range(45)])
+    store = Store(str(tmp_path / "a.db"))
+    store.upsert([a], NOW)
+    got = store.alert("u-1")
+    d = got["detail"]
+    assert got["machine"] == "localhost" and got["events"] == 45
+    assert (d["startedAt"], d["stoppedAt"], d["capacity"], d["leakspeed"]) == (NOW - 60, NOW - 30, 10, "10s")
+    assert d["decisions"] == [{"type": "ban", "origin": "crowdsec", "scope": "Ip", "value": "203.0.113.7",
+                               "duration": 14370.0, "until": NOW + 14370, "simulated": False}]
+    assert d["context"] == [["target_uri", ["/.env"]]]
+    assert len(d["events"]) == 20 and d["events"][0]["at"] == NOW - 60
+    assert d["events"][1]["meta"][0] == ["http_verb", "GET"] and len(d["events"][1]["meta"][1][1]) == 500
+    assert "detail" not in store.alerts(24, now=NOW)[0]  # lists stay small
+    assert store.alert("nope") is None
+
+
 def test_store_map_groups_places_and_categories(tmp_path):
     store = Store(str(tmp_path / "a.db"))
     store.upsert([alert(1), alert(2, lat=52.3901, lon=4.9011),  # same 0.1° cell
@@ -144,6 +166,7 @@ def test_store_adds_new_columns_to_an_old_database(tmp_path):
     store = Store(path)
     assert store.live(None, now=NOW)["cursor"] == NOW - 100  # old rows count as seen when they were created
     assert store.map(24, NOW)["points"] == [{"lat": None, "lon": None, "cn": "DE", "banned": 0, "blocked": 1, "flagged": 0}]
+    assert store.alert("old")["detail"] is None
     store.upsert([alert(1)], NOW)
     assert store.count() == 2
 
@@ -326,6 +349,11 @@ def test_dashboard_serves_page_and_api(web):
     data = json.loads(get(base + "/api/overview?hours=24")[2])
     assert data["summary"]["total"] == 1 and data["decisionsTotal"] == 1 and data["agent"]["revision"] == "test"
     assert json.loads(get(base + "/api/alerts?hours=99999&q=203.0")[2])["alerts"][0]["id"] == 1
+    detail = json.loads(get(base + "/api/alert?uuid=u-1")[2])
+    assert detail["detail"]["events"][0]["meta"][1] == ["uri", "/.env"]
+    with pytest.raises(urllib.error.HTTPError) as err:
+        get(base + "/api/alert?uuid=nope")
+    assert err.value.code == 404
     world = json.loads(get(base + "/world.json")[2])
     assert len(world["land"]) > 100 and world["centroids"]["NL"] and world["centroids"]["SG"]
     assert json.loads(get(base + "/api/map?hours=24")[2])["points"][0]["blocked"] == 1
